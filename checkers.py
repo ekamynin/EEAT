@@ -259,7 +259,9 @@ def chk_date_published(soup: BeautifulSoup, schemas: list) -> str:
         return OK
     if soup.find("time", attrs={"datetime": True}):
         return OK
-    if has_text(soup, "опубліковано", "published", "дата публікації"):
+    # Text-based: must look like "опубліковано: <date>" pattern (not just the word anywhere)
+    m = re.search(r"(опубліковано|дата публікації)\s*[:\-]?\s*\d", soup.get_text(), re.I)
+    if m:
         return OK
     return FAIL
 
@@ -272,8 +274,15 @@ def chk_date_modified(soup: BeautifulSoup, schemas: list) -> str:
             return OK
     if soup.find("meta", property="article:modified_time"):
         return OK
-    if has_text(soup, "оновлено", "updated", "дата оновлення", "last updated"):
+    # Must be "updated/оновлено" followed by or near a date — not just any mention
+    m = re.search(r"(оновлено|last updated|дата оновлення)\s*[:\-]?\s*\d", soup.get_text(), re.I)
+    if m:
         return OK
+    # <time> with a sibling/parent that mentions update
+    for t in soup.find_all("time", attrs={"datetime": True}):
+        ctx = (t.parent.get_text() if t.parent else "").lower()
+        if any(kw in ctx for kw in ["оновлено", "updated", "дата оновлення"]):
+            return OK
     return FAIL
 
 
@@ -320,8 +329,14 @@ def chk_toc(soup: BeautifulSoup) -> str:
 def chk_references(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
-    if has_text(soup, "список літератури", "джерела", "references", "бібліографія", "bibliography"):
-        return OK
+    # Must be in a heading — otherwise "джерела"/"references" appear everywhere
+    for heading in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        if has_text(heading, "список літератури", "джерела", "references", "бібліографія", "bibliography"):
+            return OK
+    # Or a dedicated section with class/id
+    for cls in ["references", "bibliography", "sources", "literature"]:
+        if find_class_or_id(soup, cls):
+            return OK
     return FAIL
 
 
@@ -398,11 +413,20 @@ def chk_trustpilot(soup: BeautifulSoup) -> str:
     return FAIL
 
 
+_SW_LICENSE_WORDS = {"gpl", "mit", "apache", "creative commons", "software", "plugin",
+                     "wordpress", "joomla", "theme", "template", "open source"}
+
 def chk_licenses(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
-    if has_text(soup, "ліцензія", "сертифікат", "license", "certificate", "акредитація"):
-        return OK
+    page_text = soup.get_text().lower()
+    for kw in ["ліцензія", "сертифікат", "акредитація", "license", "certificate"]:
+        if kw in page_text:
+            # Find the surrounding context (~100 chars) and exclude software license noise
+            for m in re.finditer(re.escape(kw), page_text):
+                ctx = page_text[max(0, m.start()-30): m.end()+80]
+                if not any(sw in ctx for sw in _SW_LICENSE_WORDS):
+                    return OK
     return FAIL
 
 
@@ -412,9 +436,16 @@ def chk_editor(soup: BeautifulSoup, schemas: list) -> str:
     for s in schemas:
         if "editor" in s or "reviewedBy" in s:
             return OK
-    if has_text(soup, "редактор", "editor", "reviewed by", "перевірено редактором"):
+    # "reviewed by" and "перевірено редактором" are specific editorial phrases
+    if has_text(soup, "reviewed by", "перевірено редактором", "редактор матеріалу",
+                "медичний редактор", "науковий редактор"):
         return OK
-    for cls in ["editor", "reviewed-by", "fact-check", "reviewer"]:
+    # "редактор" only if it's in a byline/meta context (followed by a name)
+    m = re.search(r"редактор\s*[:\-]\s*[А-ЯІЇЄҐA-Z][а-яіїєґ']+", soup.get_text(), re.I)
+    if m:
+        return OK
+    # CSS class is reliable (editor-name, fact-checker, reviewer etc)
+    for cls in ["reviewed-by", "fact-check", "reviewer", "editor-name", "fact-checker"]:
         if find_class_or_id(soup, cls):
             return OK
     return FAIL
@@ -466,7 +497,10 @@ def chk_disclaimer(soup: BeautifulSoup) -> str:
 def chk_callback(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
-    if has_text(soup, "зворотній дзвінок", "передзвонити", "callback"):
+    # "callback" is a JS keyword — only use Ukrainian phrases or HTML class/id
+    if has_text(soup, "зворотній дзвінок", "передзвонити", "замовити дзвінок", "зворотній зв'язок"):
+        return OK
+    if find_class_or_id(soup, r"callback|call-back|zvorotniy"):
         return OK
     return FAIL
 
@@ -496,24 +530,64 @@ def chk_search(soup: BeautifulSoup) -> str:
 def chk_newsletter(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
-    if has_text(soup, "розсилку", "newsletter", "підписатися", "subscribe"):
+    # "newsletter" and "розсилк" are specific enough
+    if has_text(soup, "newsletter", "розсилк"):
         return OK
+    # "subscribe" only when there's an email input nearby
+    page_text = soup.get_text().lower()
+    if "subscribe" in page_text or "підписатися" in page_text:
+        # Must have an email input on the page (actual subscription form)
+        if soup.find("input", attrs={"type": "email"}):
+            return OK
     return FAIL
+
+
+def _author_bio_section(soup: BeautifulSoup):
+    """Returns the author bio container if found, otherwise None."""
+    rx = re.compile(r"author|bio|profile|about-author|team-member|doctor|лікар", re.I)
+    return soup.find(class_=rx) or soup.find(id=rx)
 
 
 def chk_author_education(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
-    if has_text(soup, "освіта", "education", "університет", "university", "диплом", "degree", "навчання"):
+    # Prefer searching only the author bio block — whole-page search is too noisy
+    section = _author_bio_section(soup) or soup
+    if has_text(section, "освіта", "education", "університет", "university", "диплом", "degree"):
         return OK
+    # Also check schema.org Person.alumniOf / knowsAbout
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            schemas = data if isinstance(data, list) else [data]
+            for s in schemas:
+                if s.get("@type") == "Person" and (s.get("alumniOf") or s.get("hasCredential")):
+                    return OK
+        except Exception:
+            pass
     return FAIL
 
 
 def chk_author_experience(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
-    if has_text(soup, "досвід", "experience", "стаж", "years of experience", "працює"):
+    section = _author_bio_section(soup) or soup
+    # Require a number to avoid matching "experience" without any quantification
+    page_text = section.get_text()
+    if re.search(r"(досвід|стаж|experience)\s*[:\-]?\s*\d+\s*(рок|рік|year|років)", page_text, re.I):
         return OK
+    if re.search(r"\d+\s*(рок|рік|year|років)\s*(досвіду|роботи|experience|practice)", page_text, re.I):
+        return OK
+    # Also accept schema.org Person with worksFor / jobTitle
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            schemas = data if isinstance(data, list) else [data]
+            for s in schemas:
+                if s.get("@type") == "Person" and (s.get("worksFor") or s.get("jobTitle")):
+                    return OK
+        except Exception:
+            pass
     return FAIL
 
 
@@ -554,9 +628,26 @@ def chk_team_photos(soup: BeautifulSoup) -> str:
 
 
 def chk_form(soup: BeautifulSoup) -> str:
+    """Checks for a CONTACT form, not any form (search/login/newsletter don't count)."""
     if not soup:
         return FAIL
-    return OK if soup.find("form") else FAIL
+    for form in soup.find_all("form"):
+        # Skip search forms
+        if form.get("role") == "search":
+            continue
+        if form.find("input", attrs={"type": "search"}):
+            continue
+        # Must have at least 2 relevant contact inputs or a textarea (message field)
+        has_name   = bool(form.find("input", attrs={"name": re.compile(r"name|ім'я|имя|fname|lname", re.I)})
+                          or form.find("input", placeholder=re.compile(r"ім'я|name|имя", re.I)))
+        has_msg    = bool(form.find("textarea"))
+        has_phone  = bool(form.find("input", attrs={"type": "tel"})
+                          or form.find("input", attrs={"name": re.compile(r"phone|tel|телефон", re.I)})
+                          or form.find("input", placeholder=re.compile(r"телефон|phone|номер", re.I)))
+        has_email  = bool(form.find("input", attrs={"type": "email"}))
+        if has_msg or (has_name and (has_phone or has_email)):
+            return OK
+    return FAIL
 
 
 # ─── EVIDENCE: що саме знайшов чекер ──────────────────────────────────────────
