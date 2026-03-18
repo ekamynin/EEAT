@@ -557,3 +557,161 @@ def chk_form(soup: BeautifulSoup) -> str:
     if not soup:
         return FAIL
     return OK if soup.find("form") else FAIL
+
+
+# ─── EVIDENCE: що саме знайшов чекер ──────────────────────────────────────────
+
+def get_evidence(factor: str, soup: BeautifulSoup, schemas: list, base_url: str = "") -> str:
+    """
+    Повертає короткий фрагмент — що саме знайдено для цього фактора.
+    Використовується для колонки «Приклад» щоб верифікувати результати вручну.
+    """
+    if not soup:
+        return ""
+    try:
+        if factor == "HTTPS":
+            return base_url[:80]
+
+        elif factor == "Електронна адреса":
+            a = soup.find("a", href=re.compile(r"^mailto:", re.I))
+            if a:
+                return a["href"].replace("mailto:", "")[:80]
+            m = re.search(r"[\w.+-]+@[\w-]+\.\w{2,}", soup.get_text())
+            return m.group()[:80] if m else ""
+
+        elif factor == "Номер телефону":
+            a = soup.find("a", href=re.compile(r"^tel:", re.I))
+            if a:
+                return a["href"].replace("tel:", "")[:60]
+            m = re.search(r"[\+\(]?\d[\d\s\-\(\)]{7,}\d", soup.get_text())
+            return m.group().strip()[:60] if m else ""
+
+        elif factor == "Фізична адреса":
+            for s in schemas:
+                addr = s.get("address", {})
+                if addr:
+                    parts = [addr.get("streetAddress", ""), addr.get("addressLocality", "")]
+                    joined = ", ".join(p for p in parts if p)
+                    if joined:
+                        return joined[:100]
+            m = re.search(r"(вул\.|вулиця|проспект|пров\.|street)[^\n]{5,80}", soup.get_text(), re.I)
+            return m.group(0).strip()[:100] if m else ""
+
+        elif factor == "Зазначено автора":
+            for s in schemas:
+                if s.get("@type") in ("Article", "BlogPosting", "NewsArticle") and "author" in s:
+                    auth = s["author"]
+                    if isinstance(auth, list):
+                        auth = auth[0]
+                    name = auth.get("name", "") if isinstance(auth, dict) else str(auth)
+                    return f"JSON-LD author: {name}"[:100]
+            text, _ = _article_extract(soup)
+            m = re.search(r"(автор|author)\s*[:\-]\s*(.{3,60})", text, re.I)
+            return m.group(0).strip()[:100] if m else ""
+
+        elif factor == "Дата публікації":
+            for s in schemas:
+                if "datePublished" in s:
+                    return f"JSON-LD datePublished: {s['datePublished']}"[:80]
+            meta = soup.find("meta", property="article:published_time")
+            if meta:
+                return f"meta article:published_time: {meta.get('content','')}"[:80]
+            t = soup.find("time", attrs={"datetime": True})
+            if t:
+                return f"<time datetime=\"{t['datetime']}\">"[:80]
+
+        elif factor == "Дата оновлення контенту":
+            for s in schemas:
+                if "dateModified" in s:
+                    return f"JSON-LD dateModified: {s['dateModified']}"[:80]
+            meta = soup.find("meta", property="article:modified_time")
+            if meta:
+                return f"meta article:modified_time: {meta.get('content','')}"[:80]
+
+        elif factor == "Посилання на авторитетні ресурси у статті":
+            _, links = _article_extract(soup, base_url)
+            bd = urlparse(base_url).netloc
+            auth = [l for l in links if bd not in l and not any(s in l.lower() for s in _SOCIAL_AND_TRACKING)]
+            return ", ".join(auth[:3])[:150] if auth else ""
+
+        elif factor == "Посилання на соцмережі":
+            social_domains = ["facebook.com", "instagram.com", "linkedin.com",
+                              "twitter.com", "x.com", "youtube.com", "tiktok.com", "t.me"]
+            found = []
+            for a in soup.find_all("a", href=True):
+                for sd in social_domains:
+                    if sd in a["href"].lower() and sd not in found:
+                        found.append(a["href"][:60])
+                        break
+            return "; ".join(found[:3])[:150] if found else ""
+
+        elif factor in ("Organization", "BreadcrumbList", "Article / BlogPosting",
+                        "FAQPage", "Product", "Person", "LocalBusiness",
+                        "MedicalWebPage", "MedicalClinic", "MedicalCondition"):
+            type_map = {
+                "Organization":           ["Organization"],
+                "BreadcrumbList":         ["BreadcrumbList"],
+                "Article / BlogPosting":  ["Article", "BlogPosting", "NewsArticle"],
+                "FAQPage":                ["FAQPage"],
+                "Product":                ["Product"],
+                "Person":                 ["Person"],
+                "LocalBusiness":          ["LocalBusiness"],
+                "MedicalWebPage":         ["MedicalWebPage"],
+                "MedicalClinic":          ["MedicalClinic"],
+                "MedicalCondition":       ["MedicalCondition"],
+            }
+            for s in schemas:
+                t = s.get("@type", "")
+                t_list = t if isinstance(t, list) else [t]
+                for desired in type_map.get(factor, []):
+                    if desired in t_list:
+                        name = s.get("name", s.get("headline", s.get("@id", "")))
+                        return f"JSON-LD: {desired}" + (f" «{str(name)[:40]}»" if name else "")
+
+        elif factor == "Редактор / рецензент матеріалу":
+            for s in schemas:
+                if "editor" in s:
+                    ed = s["editor"]
+                    name = ed.get("name", str(ed)) if isinstance(ed, dict) else str(ed)
+                    return f"JSON-LD editor: {name}"[:80]
+                if "reviewedBy" in s:
+                    rb = s["reviewedBy"]
+                    name = rb.get("name", str(rb)) if isinstance(rb, dict) else str(rb)
+                    return f"JSON-LD reviewedBy: {name}"[:80]
+            m = re.search(r"(редактор|editor|reviewed by|перевірено)[^\n]{3,60}", soup.get_text(), re.I)
+            return m.group(0).strip()[:100] if m else ""
+
+        elif factor == "Зазначено освіту":
+            m = re.search(r"(університет|university|освіта|education|диплом|degree)[^\n]{5,80}",
+                          soup.get_text(), re.I)
+            return m.group(0).strip()[:100] if m else ""
+
+        elif factor == "Зазначено досвід роботи":
+            m = re.search(r"(досвід|experience|стаж)[^\n\d]{0,5}\d+[^\n]{0,40}",
+                          soup.get_text(), re.I)
+            return m.group(0).strip()[:100] if m else ""
+
+        elif factor == "Плашка про куки":
+            for indicator in ["cookie", "gdpr", "consent"]:
+                el = soup.find(class_=re.compile(indicator, re.I)) or soup.find(id=re.compile(indicator, re.I))
+                if el:
+                    return f"Елемент: class/id «{indicator}»"[:80]
+
+        elif factor == "Онлайн-консультант":
+            page_str = str(soup).lower()
+            for service in ["jivosite", "jivochat", "intercom", "livechat", "tawk.to", "crisp.chat", "freshchat"]:
+                if service in page_str:
+                    return f"Скрипт: {service}"
+
+        elif factor == "Пошук по сайту":
+            if soup.find("input", attrs={"type": "search"}):
+                return "<input type=\"search\">"
+            if soup.find("form", attrs={"role": "search"}):
+                return "<form role=\"search\">"
+
+        elif factor in ("Сторінка існує", "Контактна сторінка"):
+            return "(сторінка знайдена за посиланням)"
+
+    except Exception:
+        pass
+    return ""

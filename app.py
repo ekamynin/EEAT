@@ -21,21 +21,23 @@ from checkers import (
     chk_online_chat, chk_search, chk_newsletter,
     chk_author_education, chk_author_experience,
     chk_org_mission, chk_org_age, chk_reg_docs, chk_team_photos, chk_form,
+    get_evidence,
 )
 from recommendations import get_recommendation
 from crawler import analyze_all_pages, PAGE_TYPE_LABELS, PAGE_CHECKS
 
 SITE_TYPES = ["E-commerce", "Сайти послуг", "Блоги / сайти новин", "Аптеки / медицина"]
 IMPORTANCE_ORDER = {"Висока": 0, "Середня": 1, "Низька": 2}
-COLUMNS = ["Розділ", "Фактор", "Важливість", "Статус", "Рекомендація"]
+COLUMNS = ["Розділ", "Фактор", "Важливість", "Статус", "Рекомендація", "Приклад"]
 
 
 # ─── ПОБУДОВА ЧЕКЛІСТУ ────────────────────────────────────────────────────────
 
-def R(results, section, factor, importance, status):
-    """Додає рядок результату з автоматичною рекомендацією."""
+def R(results, section, factor, importance, status, soup=None, schemas=None, base_url=""):
+    """Додає рядок результату з автоматичною рекомендацією та прикладом."""
     rec = get_recommendation(factor) if status != OK else "—"
-    results.append((section, factor, importance, status, rec))
+    example = get_evidence(factor, soup, schemas or [], base_url) if (status == OK and soup is not None) else ""
+    results.append((section, factor, importance, status, rec, example))
 
 
 def build_checklist(site_type, main_url, main_soup, about_soup, contact_soup, article_soup, author_soup):
@@ -48,164 +50,175 @@ def build_checklist(site_type, main_url, main_soup, about_soup, contact_soup, ar
     art      = article_soup or main_soup
     art_schemas = get_schemas(art)
 
+    contact_schemas = get_schemas(contact_s)
+    about_schemas   = get_schemas(about_s)
+    auth_schemas    = []  # заповниться нижче
+
     # ── ЗАГАЛЬНЕ ────────────────────────────────────────────────────────────
-    R(results, "Загальне", "HTTPS",              "Висока", chk_https(main_url))
-    R(results, "Загальне", "Пошук по сайту",     "Низька",  chk_search(main_soup))
-    R(results, "Загальне", "Плашка про куки",    "Низька",  chk_cookie(main_soup))
-    R(results, "Загальне", "Онлайн-консультант", "Низька",  chk_online_chat(main_soup))
+    R(results, "Загальне", "HTTPS",              "Висока", chk_https(main_url),   main_soup, main_schemas, main_url)
+    R(results, "Загальне", "Пошук по сайту",     "Низька",  chk_search(main_soup),    main_soup, main_schemas, main_url)
+    R(results, "Загальне", "Плашка про куки",    "Низька",  chk_cookie(main_soup),    main_soup, main_schemas, main_url)
+    R(results, "Загальне", "Онлайн-консультант", "Низька",  chk_online_chat(main_soup), main_soup, main_schemas, main_url)
 
     # ── СТОРІНКА «ПРО КОМПАНІЮ» ─────────────────────────────────────────────
     about_exists = OK if about_soup else chk_page_exists(
         all_links, ["про нас", "about", "про компанію", "o-nas", "/about"]
     )
-    R(results, "Про компанію", "Сторінка існує", "Висока", about_exists)
+    R(results, "Про компанію", "Сторінка існує", "Висока", about_exists, about_s, about_schemas, main_url)
 
     if site_type in ("Блоги / сайти новин", "Аптеки / медицина", "Сайти послуг"):
         R(results, "Про компанію", "Сфера діяльності компанії", "Висока",
-          OK if about_s and len(about_s.get_text()) > 200 else WARN)
-        R(results, "Про компанію", "Місія / цінності компанії", "Середня",   chk_org_mission(about_s))
-        R(results, "Про компанію", "Вік / дата заснування",     "Середня",   chk_org_age(about_s))
-        R(results, "Про компанію", "Фотографії команди",         "Низька",    chk_team_photos(about_s))
+          OK if about_s and len(about_s.get_text()) > 200 else WARN, about_s, about_schemas, main_url)
+        R(results, "Про компанію", "Місія / цінності компанії", "Середня",   chk_org_mission(about_s),  about_s, about_schemas, main_url)
+        R(results, "Про компанію", "Вік / дата заснування",     "Середня",   chk_org_age(about_s),      about_s, about_schemas, main_url)
+        R(results, "Про компанію", "Фотографії команди",         "Низька",    chk_team_photos(about_s),  about_s, about_schemas, main_url)
 
     if site_type in ("Аптеки / медицина", "Сайти послуг", "Блоги / сайти новин"):
         imp = "Висока" if site_type == "Аптеки / медицина" else "Середня"
-        R(results, "Про компанію", "Свідоцтво / реквізити юридичної особи", imp, chk_reg_docs(about_s))
+        R(results, "Про компанію", "Свідоцтво / реквізити юридичної особи", imp, chk_reg_docs(about_s), about_s, about_schemas, main_url)
         R(results, "Про компанію", "Нагороди та досягнення", "Середня",
-          OK if about_s and any(w in about_s.get_text().lower() for w in ["нагород", "award", "перемог", "визнан"]) else FAIL)
+          OK if about_s and any(w in about_s.get_text().lower() for w in ["нагород", "award", "перемог", "визнан"]) else FAIL,
+          about_s, about_schemas, main_url)
 
     if site_type == "Блоги / сайти новин":
         R(results, "Про компанію", "Редакційна політика", "Висока",
-          chk_page_exists(all_links, ["редакційна", "editorial policy", "редакційн"]))
+          chk_page_exists(all_links, ["редакційна", "editorial policy", "редакційн"]), main_soup, main_schemas, main_url)
         R(results, "Про компанію", "Сторінка «Редакція» / «Команда»", "Висока",
-          chk_page_exists(all_links, ["редакція", "команда", "/team", "/editorial"]))
+          chk_page_exists(all_links, ["редакція", "команда", "/team", "/editorial"]), main_soup, main_schemas, main_url)
 
     if site_type == "Сайти послуг":
         R(results, "Про компанію", "ЗМІ про нас", "Середня",
-          OK if about_s and any(w in about_s.get_text().lower() for w in ["зМІ", "преса", "media", "press", "згадки"]) else FAIL)
+          OK if about_s and any(w in about_s.get_text().lower() for w in ["зМІ", "преса", "media", "press", "згадки"]) else FAIL,
+          about_s, about_schemas, main_url)
 
     # ── КОНТАКТНА СТОРІНКА ──────────────────────────────────────────────────
     contact_exists = OK if contact_soup else chk_page_exists(
         all_links, ["контакт", "contact", "зв'яжіться", "/contacts"]
     )
-    R(results, "Контактна сторінка", "Сторінка існує",           "Висока", contact_exists)
-    R(results, "Контактна сторінка", "Електронна адреса",         "Висока", chk_email(contact_s))
-    R(results, "Контактна сторінка", "Номер телефону",            "Висока", chk_phone(contact_s))
-    R(results, "Контактна сторінка", "Фізична адреса",            "Середня", chk_address(contact_s, get_schemas(contact_s)))
-    R(results, "Контактна сторінка", "Посилання на соцмережі",   "Середня", chk_social_links(main_soup))
-    R(results, "Контактна сторінка", "Форма зворотного зв'язку", "Середня", chk_form(contact_s))
+    R(results, "Контактна сторінка", "Сторінка існує",           "Висока", contact_exists,                    contact_s, contact_schemas, main_url)
+    R(results, "Контактна сторінка", "Електронна адреса",         "Висока", chk_email(contact_s),              contact_s, contact_schemas, main_url)
+    R(results, "Контактна сторінка", "Номер телефону",            "Висока", chk_phone(contact_s),              contact_s, contact_schemas, main_url)
+    R(results, "Контактна сторінка", "Фізична адреса",            "Середня", chk_address(contact_s, contact_schemas), contact_s, contact_schemas, main_url)
+    R(results, "Контактна сторінка", "Посилання на соцмережі",   "Середня", chk_social_links(main_soup),       main_soup, main_schemas, main_url)
+    R(results, "Контактна сторінка", "Форма зворотного зв'язку", "Середня", chk_form(contact_s),               contact_s, contact_schemas, main_url)
     R(results, "Контактна сторінка", "Контакти керівника",        "Низька",
-      OK if contact_s and any(w in contact_s.get_text().lower() for w in ["директор", "ceo", "керівник", "founder"]) else FAIL)
+      OK if contact_s and any(w in contact_s.get_text().lower() for w in ["директор", "ceo", "керівник", "founder"]) else FAIL,
+      contact_s, contact_schemas, main_url)
 
     if site_type == "Сайти послуг":
-        R(results, "Контактна сторінка", "Замовлення зворотного дзвінка", "Низька", chk_callback(main_soup))
+        R(results, "Контактна сторінка", "Замовлення зворотного дзвінка", "Низька", chk_callback(main_soup), main_soup, main_schemas, main_url)
         R(results, "Контактна сторінка", "Схема проїзду / карта", "Низька",
-          OK if contact_s and any(w in str(contact_s).lower() for w in ["google.com/maps", "maps.app", "openstreetmap", "iframe"]) else FAIL)
+          OK if contact_s and any(w in str(contact_s).lower() for w in ["google.com/maps", "maps.app", "openstreetmap", "iframe"]) else FAIL,
+          contact_s, contact_schemas, main_url)
 
     # ── ВАЖЛИВІ СТОРІНКИ ────────────────────────────────────────────────────
     R(results, "Важливі сторінки", "Політика конфіденційності", "Висока",
-      chk_page_exists(all_links, ["конфіденційність", "privacy", "policy"]))
+      chk_page_exists(all_links, ["конфіденційність", "privacy", "policy"]), main_soup, main_schemas, main_url)
 
     if site_type != "Блоги / сайти новин":
         R(results, "Важливі сторінки", "Користувацька угода / Публічна оферта", "Висока",
-          chk_page_exists(all_links, ["угода", "оферта", "terms", "пропозиція"]))
+          chk_page_exists(all_links, ["угода", "оферта", "terms", "пропозиція"]), main_soup, main_schemas, main_url)
         R(results, "Важливі сторінки", "Гарантії / умови повернення", "Висока",
-          chk_page_exists(all_links, ["гарантія", "повернення", "guarantee", "return"]))
+          chk_page_exists(all_links, ["гарантія", "повернення", "guarantee", "return"]), main_soup, main_schemas, main_url)
 
     if site_type in ("Сайти послуг", "E-commerce", "Аптеки / медицина"):
         R(results, "Важливі сторінки", "Доставка", "Висока",
-          chk_page_exists(all_links, ["доставка", "delivery", "shipping"]))
+          chk_page_exists(all_links, ["доставка", "delivery", "shipping"]), main_soup, main_schemas, main_url)
         R(results, "Важливі сторінки", "Способи оплати", "Висока",
-          chk_page_exists(all_links, ["оплата", "payment", "способи оплати"]))
+          chk_page_exists(all_links, ["оплата", "payment", "способи оплати"]), main_soup, main_schemas, main_url)
 
     if site_type in ("Сайти послуг", "Аптеки / медицина"):
-        R(results, "Важливі сторінки", "Ліцензії та сертифікати",             "Висока", chk_licenses(about_s))
-        R(results, "Важливі сторінки", "Відгуки на зовнішніх платформах",     "Висока", chk_trustpilot(main_soup))
-        R(results, "Важливі сторінки", "Відгуки на сайті",                    "Висока", chk_reviews(main_soup, main_schemas))
+        R(results, "Важливі сторінки", "Ліцензії та сертифікати",             "Висока", chk_licenses(about_s),            about_s, about_schemas, main_url)
+        R(results, "Важливі сторінки", "Відгуки на зовнішніх платформах",     "Висока", chk_trustpilot(main_soup),         main_soup, main_schemas, main_url)
+        R(results, "Важливі сторінки", "Відгуки на сайті",                    "Висока", chk_reviews(main_soup, main_schemas), main_soup, main_schemas, main_url)
         R(results, "Важливі сторінки", "Редакційна / маркетингова політика",  "Середня",
-          chk_page_exists(all_links, ["редакційна", "маркетингова", "editorial"]))
-        R(results, "Важливі сторінки", "Профілі у відгуковиках (TrustPilot і т.д.)", "Висока", chk_trustpilot(main_soup))
+          chk_page_exists(all_links, ["редакційна", "маркетингова", "editorial"]), main_soup, main_schemas, main_url)
+        R(results, "Важливі сторінки", "Профілі у відгуковиках (TrustPilot і т.д.)", "Висока", chk_trustpilot(main_soup), main_soup, main_schemas, main_url)
 
     R(results, "Важливі сторінки", "FAQ сторінка", "Низька",
-      chk_page_exists(all_links, ["faq", "питання", "запитання", "відповіді"]))
+      chk_page_exists(all_links, ["faq", "питання", "запитання", "відповіді"]), main_soup, main_schemas, main_url)
 
     if site_type == "Блоги / сайти новин":
-        R(results, "Важливі сторінки", "Підписка на розсилку", "Низька", chk_newsletter(main_soup))
+        R(results, "Важливі сторінки", "Підписка на розсилку", "Низька", chk_newsletter(main_soup), main_soup, main_schemas, main_url)
 
     # ── МІКРОРОЗМІТКА ───────────────────────────────────────────────────────
     R(results, "Мікророзмітка", "Organization", "Висока",
-      OK if has_schema_type(main_schemas, "Organization") else FAIL)
+      OK if has_schema_type(main_schemas, "Organization") else FAIL, main_soup, main_schemas, main_url)
     breadcrumb_imp = "Висока" if site_type == "E-commerce" else "Середня"
     R(results, "Мікророзмітка", "BreadcrumbList", breadcrumb_imp,
-      OK if has_schema_type(main_schemas, "BreadcrumbList") else FAIL)
+      OK if has_schema_type(main_schemas, "BreadcrumbList") else FAIL, main_soup, main_schemas, main_url)
     R(results, "Мікророзмітка", "Article / BlogPosting", "Висока",
-      OK if has_schema_type(main_schemas, "Article", "BlogPosting", "NewsArticle") else FAIL)
+      OK if has_schema_type(main_schemas, "Article", "BlogPosting", "NewsArticle") else FAIL, main_soup, main_schemas, main_url)
     R(results, "Мікророзмітка", "FAQPage", "Середня",
-      OK if has_schema_type(main_schemas, "FAQPage") else FAIL)
+      OK if has_schema_type(main_schemas, "FAQPage") else FAIL, main_soup, main_schemas, main_url)
 
     if site_type in ("E-commerce", "Аптеки / медицина"):
         R(results, "Мікророзмітка", "Product", "Висока",
-          OK if has_schema_type(main_schemas, "Product") else FAIL)
+          OK if has_schema_type(main_schemas, "Product") else FAIL, main_soup, main_schemas, main_url)
     if site_type in ("Блоги / сайти новин", "Аптеки / медицина"):
         R(results, "Мікророзмітка", "Person", "Висока",
-          OK if has_schema_type(main_schemas, "Person") else FAIL)
+          OK if has_schema_type(main_schemas, "Person") else FAIL, main_soup, main_schemas, main_url)
     if site_type == "Сайти послуг":
         R(results, "Мікророзмітка", "LocalBusiness", "Середня",
-          OK if has_schema_type(main_schemas, "LocalBusiness") else FAIL)
+          OK if has_schema_type(main_schemas, "LocalBusiness") else FAIL, main_soup, main_schemas, main_url)
     if site_type == "Аптеки / медицина":
         R(results, "Мікророзмітка", "MedicalWebPage",   "Висока",
-          OK if has_schema_type(main_schemas, "MedicalWebPage") else FAIL)
+          OK if has_schema_type(main_schemas, "MedicalWebPage") else FAIL,   main_soup, main_schemas, main_url)
         R(results, "Мікророзмітка", "MedicalClinic",    "Низька",
-          OK if has_schema_type(main_schemas, "MedicalClinic") else FAIL)
+          OK if has_schema_type(main_schemas, "MedicalClinic") else FAIL,    main_soup, main_schemas, main_url)
         R(results, "Мікророзмітка", "MedicalCondition", "Низька",
-          OK if has_schema_type(main_schemas, "MedicalCondition") else FAIL)
+          OK if has_schema_type(main_schemas, "MedicalCondition") else FAIL, main_soup, main_schemas, main_url)
 
     # ── СТАТТІ ──────────────────────────────────────────────────────────────
-    R(results, "Статті", "Зазначено автора",                 "Висока",  chk_author(art, art_schemas))
-    R(results, "Статті", "Дата публікації",                  "Висока",  chk_date_published(art, art_schemas))
-    R(results, "Статті", "Дата оновлення контенту",          "Висока",  chk_date_modified(art, art_schemas))
-    R(results, "Статті", "Посилання на авторитетні ресурси", "Висока",  chk_external_links(art, main_url))
+    R(results, "Статті", "Зазначено автора",                 "Висока",  chk_author(art, art_schemas),          art, art_schemas, main_url)
+    R(results, "Статті", "Дата публікації",                  "Висока",  chk_date_published(art, art_schemas),  art, art_schemas, main_url)
+    R(results, "Статті", "Дата оновлення контенту",          "Висока",  chk_date_modified(art, art_schemas),   art, art_schemas, main_url)
+    R(results, "Статті", "Посилання на авторитетні ресурси", "Висока",  chk_external_links(art, main_url),     art, art_schemas, main_url)
     R(results, "Статті", "Окремі сторінки для авторів",      "Висока",
-      chk_page_exists(all_links, ["автор", "author", "/authors", "/team"]))
+      chk_page_exists(all_links, ["автор", "author", "/authors", "/team"]), main_soup, main_schemas, main_url)
 
     editor_imp = "Висока" if site_type == "Аптеки / медицина" else "Середня"
-    R(results, "Статті", "Редактор / рецензент матеріалу",   editor_imp, chk_editor(art, art_schemas))
+    R(results, "Статті", "Редактор / рецензент матеріалу",   editor_imp, chk_editor(art, art_schemas), art, art_schemas, main_url)
 
     toc_imp = "Висока" if site_type == "Аптеки / медицина" else "Середня"
-    R(results, "Статті", "Зміст статті (Table of Contents)", toc_imp,   chk_toc(art))
+    R(results, "Статті", "Зміст статті (Table of Contents)", toc_imp,   chk_toc(art), art, art_schemas, main_url)
 
     ref_imp = "Висока" if site_type == "Аптеки / медицина" else "Середня"
-    R(results, "Статті", "Список літератури / джерела",      ref_imp,   chk_references(art))
+    R(results, "Статті", "Список літератури / джерела",      ref_imp,   chk_references(art), art, art_schemas, main_url)
 
-    R(results, "Статті", "Розподіл статей на категорії",     "Середня", chk_categories(main_soup, all_links))
-    R(results, "Статті", "Кількість переглядів",             "Середня", chk_article_views(art))
-    R(results, "Статті", "Можливість оцінки статті",         "Середня", chk_article_rating_widget(art))
-    R(results, "Статті", "Наявність зображень",              "Середня", chk_images(art))
-    R(results, "Статті", "Можливість залишити коментар",     "Середня", chk_comments(art))
-    R(results, "Статті", "Теги та хмара тегів",              "Низька",  chk_tags(art))
-    R(results, "Статті", "Повзунок прогресу читання",        "Низька",  chk_reading_progress(art))
+    R(results, "Статті", "Розподіл статей на категорії",     "Середня", chk_categories(main_soup, all_links),    main_soup, main_schemas, main_url)
+    R(results, "Статті", "Кількість переглядів",             "Середня", chk_article_views(art),                  art, art_schemas, main_url)
+    R(results, "Статті", "Можливість оцінки статті",         "Середня", chk_article_rating_widget(art),          art, art_schemas, main_url)
+    R(results, "Статті", "Наявність зображень",              "Середня", chk_images(art),                         art, art_schemas, main_url)
+    R(results, "Статті", "Можливість залишити коментар",     "Середня", chk_comments(art),                       art, art_schemas, main_url)
+    R(results, "Статті", "Теги та хмара тегів",              "Низька",  chk_tags(art),                           art, art_schemas, main_url)
+    R(results, "Статті", "Повзунок прогресу читання",        "Низька",  chk_reading_progress(art),               art, art_schemas, main_url)
 
     if site_type == "Аптеки / медицина":
-        R(results, "Статті", "Відмова від відповідальності", "Висока",  chk_disclaimer(art))
+        R(results, "Статті", "Відмова від відповідальності", "Висока",  chk_disclaimer(art), art, art_schemas, main_url)
 
     # ── СТОРІНКИ АВТОРІВ ────────────────────────────────────────────────────
     auth = author_soup or main_soup
+    auth_schemas = get_schemas(auth)
 
     R(results, "Сторінки авторів", "Окрема сторінка для автора",       "Висока",
-      OK if author_soup else chk_page_exists(all_links, ["автор", "author", "/team", "/authors"]))
-    R(results, "Сторінки авторів", "Зазначено освіту",                  "Висока", chk_author_education(auth))
-    R(results, "Сторінки авторів", "Зазначено досвід роботи",           "Висока", chk_author_experience(auth))
-    R(results, "Сторінки авторів", "Посилання на соцмережі автора",    "Середня", chk_social_links(auth))
+      OK if author_soup else chk_page_exists(all_links, ["автор", "author", "/team", "/authors"]),
+      auth, auth_schemas, main_url)
+    R(results, "Сторінки авторів", "Зазначено освіту",                  "Висока", chk_author_education(auth),  auth, auth_schemas, main_url)
+    R(results, "Сторінки авторів", "Зазначено досвід роботи",           "Висока", chk_author_experience(auth), auth, auth_schemas, main_url)
+    R(results, "Сторінки авторів", "Посилання на соцмережі автора",    "Середня", chk_social_links(auth),      auth, auth_schemas, main_url)
     R(results, "Сторінки авторів", "Згадки автора на інших платформах","Середня", WARN)
 
     if site_type == "Аптеки / медицина":
         R(results, "Сторінки лікарів", "Окремі сторінки для лікарів", "Висока",
-          chk_page_exists(all_links, ["лікар", "doctor", "physician", "спеціаліст"]))
+          chk_page_exists(all_links, ["лікар", "doctor", "physician", "спеціаліст"]), main_soup, main_schemas, main_url)
         R(results, "Сторінки лікарів", "Спеціальність лікаря", "Висока",
-          OK if auth and any(w in auth.get_text().lower() for w in ["спеціальність", "specialty", "лікар"]) else FAIL)
-        R(results, "Сторінки лікарів", "Медична освіта та кваліфікація", "Висока", chk_author_education(auth))
-        R(results, "Сторінки лікарів", "Стаж лікаря",                   "Висока", chk_author_experience(auth))
-        R(results, "Сторінки лікарів", "Ліцензії та сертифікати лікаря","Висока", chk_licenses(auth))
-        R(results, "Сторінки лікарів", "Посилання на профілі в соцмережах", "Середня", chk_social_links(auth))
+          OK if auth and any(w in auth.get_text().lower() for w in ["спеціальність", "specialty", "лікар"]) else FAIL,
+          auth, auth_schemas, main_url)
+        R(results, "Сторінки лікарів", "Медична освіта та кваліфікація", "Висока", chk_author_education(auth),  auth, auth_schemas, main_url)
+        R(results, "Сторінки лікарів", "Стаж лікаря",                   "Висока", chk_author_experience(auth), auth, auth_schemas, main_url)
+        R(results, "Сторінки лікарів", "Ліцензії та сертифікати лікаря","Висока", chk_licenses(auth),          auth, auth_schemas, main_url)
+        R(results, "Сторінки лікарів", "Посилання на профілі в соцмережах", "Середня", chk_social_links(auth), auth, auth_schemas, main_url)
 
     return results
 
@@ -232,7 +245,7 @@ def to_excel(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="Повний аналіз")
         ws = writer.sheets["Повний аналіз"]
 
-        col_widths = {"A": 22, "B": 46, "C": 12, "D": 28, "E": 70}
+        col_widths = {"A": 22, "B": 46, "C": 12, "D": 28, "E": 70, "F": 50}
         for col, w in col_widths.items():
             ws.column_dimensions[col].width = w
 
@@ -255,8 +268,9 @@ def to_excel(df: pd.DataFrame) -> bytes:
             if fill:
                 for cell in row:
                     cell.fill = fill
-            # Wrap text for recommendation column
+            # Wrap text for recommendation and example columns
             row[4].alignment = Alignment(wrap_text=True, vertical="top")
+            row[5].alignment = Alignment(wrap_text=True, vertical="top")
 
         # ── Аркуш 2: лише провали + рекомендації ──
         fails_df = df[df["Статус"] != OK][["Розділ", "Фактор", "Важливість", "Рекомендація"]].copy()
@@ -367,13 +381,14 @@ def tab_full_results(df):
             expanded=(sec_score < 75),
         ):
             st.dataframe(
-                sec_df[["Фактор", "Важливість", "Статус"]],
+                sec_df[["Фактор", "Важливість", "Статус", "Приклад"]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Фактор":     st.column_config.TextColumn("Фактор",     width="large"),
-                    "Важливість": st.column_config.TextColumn("Важливість", width="small"),
-                    "Статус":     st.column_config.TextColumn("Статус",     width="medium"),
+                    "Фактор":     st.column_config.TextColumn("Фактор",                    width="large"),
+                    "Важливість": st.column_config.TextColumn("Важливість",                width="small"),
+                    "Статус":     st.column_config.TextColumn("Статус",                    width="medium"),
+                    "Приклад":    st.column_config.TextColumn("Приклад (що знайдено)",     width="large"),
                 },
             )
 
@@ -514,7 +529,7 @@ def to_excel_with_crawl(df: pd.DataFrame, crawl_data: dict) -> bytes:
         # ── Аркуш 1: Повний аналіз ──────────────────────────────────────
         df.to_excel(writer, index=False, sheet_name="Повний аналіз")
         ws = writer.sheets["Повний аналіз"]
-        for col, w in {"A": 22, "B": 46, "C": 12, "D": 28, "E": 70}.items():
+        for col, w in {"A": 22, "B": 46, "C": 12, "D": 28, "E": 70, "F": 50}.items():
             ws.column_dimensions[col].width = w
         style_header(ws)
         for row in ws.iter_rows(min_row=2):
@@ -522,6 +537,7 @@ def to_excel_with_crawl(df: pd.DataFrame, crawl_data: dict) -> bytes:
             if fill:
                 for cell in row: cell.fill = fill
             row[4].alignment = Alignment(wrap_text=True, vertical="top")
+            row[5].alignment = Alignment(wrap_text=True, vertical="top")
 
         # ── Аркуш 2: Рекомендації ────────────────────────────────────────
         fails_df = df[df["Статус"] != OK][["Розділ", "Фактор", "Важливість", "Рекомендація"]].copy()
@@ -805,7 +821,7 @@ def to_excel_with_comparison(
         # ── Sheet 2: Повний аналіз ───────────────────────────────────────
         main_df.to_excel(writer, index=False, sheet_name="Повний аналіз")
         ws2 = writer.sheets["Повний аналіз"]
-        for col, w in {"A": 22, "B": 46, "C": 12, "D": 28, "E": 70}.items():
+        for col, w in {"A": 22, "B": 46, "C": 12, "D": 28, "E": 70, "F": 50}.items():
             ws2.column_dimensions[col].width = w
         style_header(ws2)
         for row in ws2.iter_rows(min_row=2):
@@ -813,6 +829,7 @@ def to_excel_with_comparison(
             if fill:
                 for cell in row: cell.fill = fill
             row[4].alignment = Alignment(wrap_text=True, vertical="top")
+            row[5].alignment = Alignment(wrap_text=True, vertical="top")
 
         # ── Sheet 3: Рекомендації ────────────────────────────────────────
         fails_df = main_df[main_df["Статус"] != OK][["Розділ", "Фактор", "Важливість", "Рекомендація"]].copy()
