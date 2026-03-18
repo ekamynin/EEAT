@@ -294,25 +294,49 @@ _SOCIAL_AND_TRACKING = {
     "pixel.facebook.com", "doubleclick.net", "googlesyndication.com",
 }
 
+# Домени, які Google вважає авторитетними джерелами (гайд асесорів)
+_AUTHORITATIVE_DOMAINS = {
+    ".gov", ".edu",
+    "wikipedia.org", "who.int", "nih.gov", "cdc.gov",
+    "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov", "cochrane.org",
+    "mayoclinic.org", "webmd.com", "healthline.com", "bmj.com",
+    "nature.com", "science.org", "scholar.google",
+    "bbc.com", "bbc.co.uk", "reuters.com", "apnews.com",
+    "nytimes.com", "theguardian.com",
+    # UA авторитетні
+    "moz.gov.ua", "phc.org.ua", "rada.gov.ua", "kmu.gov.ua",
+}
+
+
+def _is_authoritative(link: str) -> bool:
+    link_lower = link.lower()
+    return any(auth in link_lower for auth in _AUTHORITATIVE_DOMAINS)
+
 
 def chk_external_links(soup: BeautifulSoup, base_url: str) -> str:
     if not soup:
         return FAIL
     base_domain = urlparse(base_url).netloc
 
-    # Trafilatura повертає тільки посилання всередині тіла статті —
-    # без соцмереж у футері, без рекламних блоків, без навігації
+    # Trafilatura повертає тільки посилання всередині тіла статті
     _, content_links = _article_extract(soup, base_url)
 
-    authoritative = [
+    external = [
         link for link in content_links
         if base_domain not in link
         and not any(s in link.lower() for s in _SOCIAL_AND_TRACKING)
     ]
 
-    if len(authoritative) >= 3:
+    high_auth = [l for l in external if _is_authoritative(l)]
+
+    # 1+ авторитетне посилання (.gov/.edu/WHO/NIH тощо) — відразу OK
+    if high_auth:
         return OK
-    if len(authoritative) >= 1:
+    # 3+ будь-яких зовнішніх посилань у контенті — OK
+    if len(external) >= 3:
+        return OK
+    # 1-2 посилання — варто перевірити вручну
+    if len(external) >= 1:
         return WARN
     return FAIL
 
@@ -722,8 +746,12 @@ def get_evidence(factor: str, soup: BeautifulSoup, schemas: list, base_url: str 
         elif factor == "Посилання на авторитетні ресурси у статті":
             _, links = _article_extract(soup, base_url)
             bd = urlparse(base_url).netloc
-            auth = [l for l in links if bd not in l and not any(s in l.lower() for s in _SOCIAL_AND_TRACKING)]
-            return ", ".join(auth[:3])[:150] if auth else ""
+            ext = [l for l in links if bd not in l and not any(s in l.lower() for s in _SOCIAL_AND_TRACKING)]
+            # Спочатку показуємо авторитетні (.gov/.edu/WHO/NIH), потім решту
+            high = [l for l in ext if _is_authoritative(l)]
+            show = high if high else ext
+            prefix = "🏛 " if high else ""
+            return prefix + ", ".join(show[:3])[:150] if show else ""
 
         elif factor == "Посилання на соцмережі":
             social_domains = ["facebook.com", "instagram.com", "linkedin.com",
