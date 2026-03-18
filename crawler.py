@@ -209,6 +209,28 @@ def _has_content_block(soup):
     text = soup.get_text(strip=True)
     return OK if len(text) > 300 else FAIL
 
+
+def _is_book_or_product_author_page(soup: BeautifulSoup) -> bool:
+    """
+    Повертає True якщо /authors/ сторінка є каталогом продуктів (автор книг,
+    товарів тощо), а НЕ сторінкою автора контенту (блогера, журналіста).
+    Такі сторінки не мають сенсу перевіряти чеками EEAT для авторів.
+    """
+    if not soup:
+        return False
+    # ISBN — 100% книжкова сторінка
+    if re.search(r"\bISBN\b", soup.get_text()):
+        return True
+    # 2+ кнопки купити або елементи ціни → каталог товарів
+    buy = soup.find_all(class_=re.compile(r"buy|cart|кошик|купит|add-to", re.I))
+    prices = soup.find_all(class_=re.compile(r"\bprice\b|ціна|вартість|cost", re.I))
+    if len(buy) >= 2 or len(prices) >= 2:
+        return True
+    # itemprop="price" — schema.org Product
+    if len(soup.find_all(attrs={"itemprop": "price"})) >= 2:
+        return True
+    return False
+
 def _has_map(soup):
     if not soup: return FAIL
     page_str = str(soup).lower()
@@ -515,6 +537,11 @@ def collect_urls(
 def fetch_and_analyze(url: str, page_type: str, base_url: str) -> dict:
     soup = fetch(url)
     if not soup:
+        return {"url": url, "label": url, "error": True, "results": {}}
+
+    # Перевіряємо: /authors/ сторінка у книжковому/e-commerce магазині є
+    # каталогом авторів книг, а не автором контенту — такі сторінки пропускаємо
+    if page_type == "author" and _is_book_or_product_author_page(soup):
         return {"url": url, "label": url, "error": True, "results": {}}
 
     schemas = get_schemas(soup)

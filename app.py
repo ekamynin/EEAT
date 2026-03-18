@@ -334,7 +334,10 @@ def run_analysis(url: str, site_type: str, progress):
     article_soup = try_fetch(["blog", "блог", "статт", "новин", "article", "/news"])
 
     progress.progress(70, "Пошук сторінки автора...")
-    author_soup = try_fetch(["автор", "author", "/authors", "/team"])
+    _raw_author = try_fetch(["автор", "author", "/authors", "/team"])
+    # Якщо знайдена сторінка є каталогом авторів книг (e-commerce) — ігноруємо її
+    from crawler import _is_book_or_product_author_page
+    author_soup = None if _is_book_or_product_author_page(_raw_author) else _raw_author
 
     progress.progress(85, "Аналіз факторів E-E-A-T...")
     results = build_checklist(
